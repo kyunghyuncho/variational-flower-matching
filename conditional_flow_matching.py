@@ -107,7 +107,12 @@ class FlowMatchingLightningModule(pl.LightningModule):
         self.lr = lr
         self.kl_weight = kl_weight
         self.input_dim = input_dim
-        self.normal_prior = Normal(torch.zeros(ccn_output_dim), torch.ones(ccn_output_dim))
+        self.normal_prior = None # Initialize as None
+
+    def setup(self, stage=None):
+        # Create the normal prior on the device of the module
+        self.normal_prior = Normal(torch.zeros(self.input_dim, device=self.device), 
+                                   torch.ones(self.input_dim, device=self.device))
 
     def forward(self, x_t, t):
         return self.flow_model(x_t, t)
@@ -186,9 +191,9 @@ if __name__ == '__main__':
 
     # Trainer
     trainer = pl.Trainer(max_epochs=epochs, 
-                                  accelerator='auto', 
-                                  devices=1)
-
+                         accelerator='auto',
+                         devices=1)
+    
     # Train the model
     trainer.fit(model, data_module)
 

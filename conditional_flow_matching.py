@@ -126,9 +126,9 @@ class SampleAndLogImagesCallback(Callback):
             # Define the constraints for sampling
             constraints_list = [
                 torch.tensor([0.,0.,0.]), # Even, > 4, Black
-                torch.tensor([1.,0.,0.]), # Odd, > 4, Black
+                torch.tensor([1.,0.,1.]), # Odd, > 4, White
                 torch.tensor([0.,1.,0.]), # Even, <= 4, Black
-                torch.tensor([1.,1.,0.]), # Odd, <= 4, Black
+                torch.tensor([1.,1.,1.]), # Odd, <= 4, White
             ]
 
             for i, constraints in enumerate(constraints_list):
@@ -237,12 +237,15 @@ class FlowMatchingLightningModule(pl.LightningModule):
                 # Sample from the normal prior
                 z = self.normal_prior.sample((num_samples,))
             x_t = z
-            num_steps = 1000
+            num_steps = 100
             dt = 1.0 / num_steps
             for i in range(num_steps):
                 t = torch.ones(num_samples, device=self.device) * (1 - (i * dt))
                 v_t_predicted = self(x_t, t)
-                x_t = x_t + v_t_predicted * dt
+                # x_t = x_t + v_t_predicted * dt
+                x_0 = x_t + v_t_predicted * t.unsqueeze(-1)
+                x_t = (t - dt).unsqueeze(-1) * z + (1 - (t - dt).unsqueeze(-1)) * x_0
+
             return x_t.view(-1, 1, 28, 28)
 
 if __name__ == '__main__':
@@ -250,9 +253,9 @@ if __name__ == '__main__':
         "batch_size": 128,
         "lr": 1e-3,
         "epochs": 1000,
-        "kl_weight": 1e-3,
+        "kl_weight": 0.,
         "input_dim": 784,
-        "hidden_dim": 784,
+        "hidden_dim": 1024,
         "constraint_dim": 3,
         "ccn_output_dim": 784,
         "flip_prob": 0.,

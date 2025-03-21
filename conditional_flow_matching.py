@@ -17,18 +17,18 @@ from pytorch_lightning.callbacks import Callback
 
 # Define the Constraint-Coding Network
 class ConstraintCodingNetwork(nn.Module):
-    def __init__(self, constraint_dim, output_dim):
+    def __init__(self, constraint_dim, output_dim, hidden_dim=256):
         super().__init__()
-        self.fc1 = nn.Linear(constraint_dim, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 256)
-        self.fc_mean = nn.Linear(256, output_dim)
-        # self.fc_log_var = nn.Linear(256, output_dim)
+        self.fc1 = nn.Linear(constraint_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc_mean = nn.Linear(hidden_dim, output_dim)
+        # self.fc_log_var = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, constraints):
         x = F.relu(self.fc1(constraints))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
+        x = F.relu(self.fc2(x)) + x
+        x = F.relu(self.fc3(x)) + x
         mean = self.fc_mean(x)
         # log_var = self.fc_log_var(x)
         log_var = torch.zeros_like(mean) # Assuming unit variance for simplicity
@@ -36,24 +36,22 @@ class ConstraintCodingNetwork(nn.Module):
 
 # Define the Flow Matching Model
 class FlowMatchingModel(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, hidden_dim=256):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, 128) # Input: interpolated point + time
-        self.t1 = nn.Linear(1, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.t2 = nn.Linear(1, 256)
-        self.fc3 = nn.Linear(256, 256)
-        self.t3 = nn.Linear(1, 256)
-        self.fc4 = nn.Linear(256, input_dim)
-        self.gate = nn.Linear(256, input_dim)
+        self.fc1 = nn.Linear(input_dim, hidden_dim) # Input: interpolated point + time
+        self.t1 = nn.Linear(1, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.t2 = nn.Linear(1, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.t3 = nn.Linear(1, hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, input_dim)
 
     def forward(self, x_t, t):
         # Concatenate input and time
-        x = F.tanh(self.fc1(x_t) + self.t1(t.unsqueeze(-1)))
-        x = F.tanh(self.fc2(x) + self.t2(t.unsqueeze(-1)))
-        x = F.tanh(self.fc3(x) + self.t3(t.unsqueeze(-1)))
-        g = torch.sigmoid(self.gate(x))
-        v_t_predicted = g * self.fc4(x) + (1-g) * x_t
+        x = F.relu(self.fc1(x_t) + self.t1(t.unsqueeze(-1)))
+        x = F.relu(self.fc2(x) + self.t2(t.unsqueeze(-1))) + x
+        x = F.relu(self.fc3(x) + self.t3(t.unsqueeze(-1))) + x
+        v_t_predicted = self.fc4(x)
         return v_t_predicted
 
 # Define the MNIST Dataset with Constraints (including color flip)
@@ -155,16 +153,17 @@ class SampleAndLogImagesCallback(Callback):
 class FlowMatchingLightningModule(pl.LightningModule):
     def __init__(self, 
                  input_dim=784, 
+                 hidden_dim=256,
                  constraint_dim=3, 
                  ccn_output_dim=784, 
                  lr=1e-3, 
                  kl_weight=1e-4,
                  constraint_conditional=True):
         super().__init__()
-        self.flow_model = FlowMatchingModel(input_dim)
+        self.flow_model = FlowMatchingModel(input_dim, hidden_dim)
         self.constraint_conditional = constraint_conditional
         if constraint_conditional:
-            self.constraint_coding_network = ConstraintCodingNetwork(constraint_dim, ccn_output_dim)
+            self.constraint_coding_network = ConstraintCodingNetwork(constraint_dim, ccn_output_dim, hidden_dim)
         self.lr = lr
         self.kl_weight = kl_weight
         self.input_dim = input_dim
@@ -253,6 +252,7 @@ if __name__ == '__main__':
         "epochs": 1000,
         "kl_weight": 1e-3,
         "input_dim": 784,
+        "hidden_dim": 784,
         "constraint_dim": 3,
         "ccn_output_dim": 784,
         "flip_prob": 0.,
@@ -267,6 +267,7 @@ if __name__ == '__main__':
 
     # Model
     model = FlowMatchingLightningModule(input_dim=config["input_dim"],
+                                        hidden_dim=config["hidden_dim"],
                                         constraint_dim=config["constraint_dim"],
                                         ccn_output_dim=config["ccn_output_dim"],
                                         lr=config["lr"],

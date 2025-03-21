@@ -49,9 +49,9 @@ class FlowMatchingModel(nn.Module):
 
     def forward(self, x_t, t):
         # Concatenate input and time
-        x = F.relu(self.fc1(x_t) + self.t1(t.unsqueeze(-1)))
-        x = F.relu(self.fc2(x) + self.t2(t.unsqueeze(-1)))
-        x = F.relu(self.fc3(x) + self.t3(t.unsqueeze(-1)))
+        x = F.tanh(self.fc1(x_t) + self.t1(t.unsqueeze(-1)))
+        x = F.tanh(self.fc2(x) + self.t2(t.unsqueeze(-1)))
+        x = F.tanh(self.fc3(x) + self.t3(t.unsqueeze(-1)))
         g = torch.sigmoid(self.gate(x))
         v_t_predicted = g * self.fc4(x) + (1-g) * x_t
         return v_t_predicted
@@ -96,7 +96,8 @@ class MNISTDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.flip_prob = flip_prob
-        self.transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+        # self.transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+        self.transform = transforms.ToTensor()
 
 
     def prepare_data(self):
@@ -208,7 +209,8 @@ class FlowMatchingLightningModule(pl.LightningModule):
 
         if self.constraint_conditional:
             # KL divergence regularization for the constraint-coding network
-            kl_loss = torch.mean(torch.distributions.kl.kl_divergence(prior_distribution, self.normal_prior))
+            kl_loss = torch.mean(torch.distributions.kl.kl_divergence(prior_distribution, 
+                                                                      self.normal_prior))
         else:
             kl_loss = torch.tensor(0.0, device=self.device)
 
@@ -241,7 +243,7 @@ class FlowMatchingLightningModule(pl.LightningModule):
             for i in range(num_steps):
                 t = torch.ones(num_samples, device=self.device) * (1 - (i * dt))
                 v_t_predicted = self(x_t, t)
-                x_t = x_t - v_t_predicted * dt
+                x_t = x_t + v_t_predicted * dt
             return x_t.view(-1, 1, 28, 28)
 
 if __name__ == '__main__':

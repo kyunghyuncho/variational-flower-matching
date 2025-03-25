@@ -67,6 +67,9 @@ class VelocityFieldNetwork(nn.Module):
         self.conv5 = nn.Conv2d(in_channels=hidden_dim, out_channels=input_dim, kernel_size=3, padding=1)
 
     def forward(self, x, temperature):
+        if len(temperature.shape) == 1:
+            temperature = temperature.unsqueeze(-1)
+
         x = F.relu(self.conv1(x) + self.temp1(temperature).unsqueeze(-1).unsqueeze(-1))
         x = F.relu(self.conv2(x) + self.temp2(temperature).unsqueeze(-1).unsqueeze(-1))
         x = F.relu(self.conv3(x) + self.temp3(temperature).unsqueeze(-1).unsqueeze(-1))
@@ -111,13 +114,13 @@ class SampleAndLogImagesCallback(Callback):
             samples = np.clip(samples, 0, 1)
             samples = np.concatenate(samples, axis=1)
 
-            fig = plt.figure(figsize=(10, 10))
+            fig = plt.figure()
             plt.imshow(samples, cmap='gray')
             plt.axis('off')
-            plt.show()
+            plt.tight_layout()
 
             # Log the samples to wandb
-            trainer.logger.experiment.log({"samples": [wandb.Image(fig)]})
+            trainer.logger.experiment.log({f"Epoch_{trainer.current_epoch}_samples": [wandb.Image(fig)]})
         pl_module.train()
     
 # Define the variational flow matching lightning module.
@@ -142,16 +145,16 @@ class VariationalFlowMatching(pl.LightningModule):
         z = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
 
         # draw a random temperature.
-        temperature = torch.rand(x.shape[0], 1)
+        temperature = torch.rand(x.shape[0], device=self.device)
 
         # compute the interpolated points.
-        x_t = temperature * z + (1 - temperature) * x
+        x_t = temperature[:,None,None,None] * z + (1 - temperature[:,None,None,None]) * x
 
         # The velocity field for conditional Gaussian path
         v_t_true = x - z
 
         # predict the velocity field
-        v_t_pred = self(x_t, temperature)
+        v_t_pred = self(x_t, temperature.unsqueeze(-1))
 
         # compute the loss
         loss = F.mse_loss(v_t_pred, v_t_true)
@@ -190,12 +193,16 @@ class VariationalFlowMatching(pl.LightningModule):
         return x_t
 
 if __name__ == "__main__":
+    config = {
+        'batch_size': 128,
+        'epochs': 10,
+    }
 
     # initialize wandb
     wandb.init(project='variational-flow-matching')
 
     # initialize the data module
-    data_module = MNISTDataModule(batch_size=32)
+    data_module = MNISTDataModule(batch_size=config['batch_size'])
 
     # initialize the model
     model = VariationalFlowMatching(input_dim=1, hidden_dim=32, learning_rate=1e-3)
@@ -204,7 +211,7 @@ if __name__ == "__main__":
     sample_callback = SampleAndLogImagesCallback(num_samples=16)
 
     # initialize the trainer
-    trainer = pl.Trainer(max_epochs=10, 
+    trainer = pl.Trainer(max_epochs=config['epochs'], 
                          accelerator='auto', 
                          devices=1,
                          logger=WandbLogger(project='variational-flow-matching'),

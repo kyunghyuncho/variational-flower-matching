@@ -30,14 +30,14 @@ class PosteriorNetwork(nn.Module):
         self.conv3 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
         self.conv4 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
         # the final layer should reduce the channel size to 2.
-        self.conv5 = nn.Conv2d(in_channels=hidden_dim, out_channels=2, kernel_size=3, padding=1)
+        self.conv_final = nn.Conv2d(in_channels=hidden_dim, out_channels=2, kernel_size=3, padding=1)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
-        x = self.conv5(x)
+        x = F.tanh(self.conv1(x))
+        x = F.tanh(self.conv2(x) + F.adaptive_avg_pool2d(x, 1)) + x
+        x = F.tanh(self.conv3(x) + F.adaptive_avg_pool2d(x, 1)) + x 
+        x = F.tanh(self.conv4(x) + F.adaptive_avg_pool2d(x, 1)) + x
+        x = self.conv_final(x)
 
         # the output should be the mean and log variance of the posterior distribution.
         mean, logvar = torch.chunk(x, 2, dim=1)
@@ -70,10 +70,10 @@ class VelocityFieldNetwork(nn.Module):
         if len(temperature.shape) == 1:
             temperature = temperature.unsqueeze(-1)
 
-        x = F.relu(self.conv1(x) + self.temp1(temperature).unsqueeze(-1).unsqueeze(-1))
-        x = F.relu(self.conv2(x) + self.temp2(temperature).unsqueeze(-1).unsqueeze(-1))
-        x = F.relu(self.conv3(x) + self.temp3(temperature).unsqueeze(-1).unsqueeze(-1))
-        x = F.relu(self.conv4(x) + self.temp4(temperature).unsqueeze(-1).unsqueeze(-1))
+        x = F.tanh(self.conv1(x) + self.temp1(temperature).unsqueeze(-1).unsqueeze(-1))
+        x = x + F.tanh(self.conv2(x) + self.temp2(temperature).unsqueeze(-1).unsqueeze(-1))
+        x = x + F.tanh(self.conv3(x) + self.temp3(temperature).unsqueeze(-1).unsqueeze(-1))
+        x = x + F.tanh(self.conv4(x) + self.temp4(temperature).unsqueeze(-1).unsqueeze(-1))
         x = self.conv5(x)
 
         return x
@@ -101,22 +101,70 @@ class MNISTDataModule(pl.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.batch_size)
     
+    def image_size(self):
+        return (1, 28, 28)
+    
+# Let's define CelebA Data Module: i'm using pytorch lightning.
+class CelebADataModule(pl.LightningDataModule):
+    def __init__(self, batch_size=32):
+        super().__init__()
+        self.batch_size = batch_size
+
+    def prepare_data(self):
+        # download the data
+        datasets.CelebA(root='data', split='train', download=True)
+        datasets.CelebA(root='data', split='test', download=True)
+
+    def setup(self, stage=None):
+        if stage == 'fit' or stage is None:
+            transform = transforms.Compose([transforms.ToTensor()])
+            self.train_dataset = datasets.CelebA(root='data', split='train', transform=transform)
+            self.val_dataset = datasets.CelebA(root='data', split='test', transform=transform)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.batch_size)
+    
+    def image_size(self):
+        return (3, 64, 64)
+    
 # Define a callback to sample and log images
 class SampleAndLogImagesCallback(Callback):
     def __init__(self, num_samples=16):
         self.num_samples = num_samples
 
-    def on_train_epoch_end(self, trainer, pl_module):
+    def on_train_batch_end(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs, # Output from the training_step
+        batch,   # The batch data
+        batch_idx: int, # Index of the batch within the current epoch
+    ):
+        if trainer.global_step % pl_module.visualization_interval != 0:
+            return
+        
         pl_module.eval()
         with torch.no_grad():
             samples = pl_module.sample(num_samples=self.num_samples)
             samples = samples.squeeze().cpu().numpy()
             samples = np.clip(samples, 0, 1)
-            samples = np.concatenate(samples, axis=1)
+            # samples = np.concatenate(samples, axis=1)
 
             fig = plt.figure()
-            plt.imshow(samples, cmap='gray')
-            plt.axis('off')
+
+            # samples is a 4D tensor: (num_samples, num_channels, height, width).
+            # we want to plot each sample in a grid.
+            # we will plot np.round(np.sqrt(num_samples)) samples in each row.
+            num_rows = math.ceil(np.sqrt(self.num_samples))
+            num_cols = math.ceil(self.num_samples / num_rows)
+
+            for i in range(self.num_samples):
+                plt.subplot(num_rows, num_cols, i+1)
+                plt.imshow(samples[i].transpose(1, 2, 0))
+                plt.axis('off')
             plt.tight_layout()
 
             # Log the samples to wandb
@@ -125,12 +173,20 @@ class SampleAndLogImagesCallback(Callback):
     
 # Define the variational flow matching lightning module.
 class VariationalFlowMatching(pl.LightningModule):
-    def __init__(self, input_dim, hidden_dim, learning_rate, image_size=(28, 28)):
+    def __init__(self, input_dim, 
+                 hidden_dim, 
+                 learning_rate, 
+                 kl_weight=1.0,
+                 visualization_interval=100,
+                 image_size=(28, 28)):
         super(VariationalFlowMatching, self).__init__()
         self.posterior = PosteriorNetwork(input_dim, hidden_dim)
         self.velocity_field = VelocityFieldNetwork(input_dim, hidden_dim)
         self.learning_rate = learning_rate
+        self.kl_weight = kl_weight
+        self.input_dim = input_dim
         self.image_size = image_size
+        self.visualization_interval = visualization_interval
 
     def forward(self, x, temperature):
         # compute the velocity field
@@ -164,7 +220,7 @@ class VariationalFlowMatching(pl.LightningModule):
         kl_div = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
 
         # the loss is the sum of the MSE loss and KL divergence.
-        loss = loss + kl_div
+        loss = loss + self.kl_weight * kl_div
 
         self.log('train_loss', loss)
 
@@ -175,7 +231,7 @@ class VariationalFlowMatching(pl.LightningModule):
         return optimizer
     
     def sample(self, num_samples=16, num_steps=100):
-        x_t = torch.randn(num_samples, 1, self.image_size[0], self.image_size[1], device=self.device)
+        x_t = torch.randn(num_samples, self.input_dim, self.image_size[0], self.image_size[1], device=self.device)
         
         dt = 1.0 / num_steps
         for i in range(num_steps):
@@ -194,18 +250,30 @@ class VariationalFlowMatching(pl.LightningModule):
 
 if __name__ == "__main__":
     config = {
-        'batch_size': 128,
-        'epochs': 10,
+        'batch_size': 8,
+        'epochs': 100,
+        'hidden_dim': 32,
+        'learning_rate': 1e-3,
+        'kl_weight': 1e-4, 
+        'visualization_interval': 100,
     }
+
+    wandb.finish()
 
     # initialize wandb
     wandb.init(project='variational-flow-matching')
 
     # initialize the data module
-    data_module = MNISTDataModule(batch_size=config['batch_size'])
+    # data_module = MNISTDataModule(batch_size=config['batch_size'])
+    data_module = CelebADataModule(batch_size=config['batch_size'])
 
     # initialize the model
-    model = VariationalFlowMatching(input_dim=1, hidden_dim=32, learning_rate=1e-3)
+    model = VariationalFlowMatching(input_dim=data_module.image_size()[0], 
+                                    hidden_dim=config['hidden_dim'],
+                                    learning_rate=config['learning_rate'],
+                                    kl_weight=config['kl_weight'],
+                                    image_size=data_module.image_size()[1:],
+                                    visualization_interval=config['visualization_interval'])
 
     # Sample and Log Images Callback
     sample_callback = SampleAndLogImagesCallback(num_samples=16)

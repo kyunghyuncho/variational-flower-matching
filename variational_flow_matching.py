@@ -320,7 +320,10 @@ class SampleAndLogImagesCallback(Callback):
 
             for i in range(self.num_samples):
                 plt.subplot(num_rows, num_cols, i+1)
-                plt.imshow(samples[i].transpose(1, 2, 0))
+                if len(samples[i].shape) < 3:
+                    plt.imshow(samples[i], cmap='gray')
+                else:
+                    plt.imshow(samples[i].transpose(1, 2, 0))
                 plt.axis('off')
             plt.tight_layout()
 
@@ -426,8 +429,8 @@ if __name__ == "__main__":
     wandb.init(project='variational-flow-matching')
 
     # initialize the data module
-    # data_module = MNISTDataModule(batch_size=config['batch_size'])
-    data_module = CelebADataModule(batch_size=config['batch_size'])
+    data_module = MNISTDataModule(batch_size=config['batch_size'])
+    # data_module = CelebADataModule(batch_size=config['batch_size'])
 
     # initialize the model
     model = VariationalFlowMatching(input_dim=data_module.image_size()[0], 

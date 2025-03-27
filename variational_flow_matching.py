@@ -15,28 +15,98 @@ import wandb
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import Callback
 
+
 # Define the posterior network.
+# Unet based network
+class PosteriorUNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3):
+        super(PosteriorUNet, self).__init__()
+        
+        # Encoder (downsampling path)
+        self.enc1 = nn.Conv2d(input_dim, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.enc2 = nn.Conv2d(hidden_dim, hidden_dim * 2, kernel_size=kernel_size, padding='same')
+        self.enc3 = nn.Conv2d(hidden_dim * 2, hidden_dim * 4, kernel_size=kernel_size, padding='same')
+        
+        # Bottleneck
+        self.bottleneck = nn.Conv2d(hidden_dim * 4, hidden_dim * 4, kernel_size=kernel_size, padding='same')
+        
+        # Decoder (upsampling path)
+        self.dec3 = nn.Conv2d(hidden_dim * 8, hidden_dim * 2, kernel_size=kernel_size, padding='same')
+        self.dec2 = nn.Conv2d(hidden_dim * 4, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.dec1 = nn.Conv2d(hidden_dim * 2, 2, kernel_size=kernel_size, padding='same')
+        
+        # Max pooling for downsampling
+        self.pool = nn.MaxPool2d(2)
+        
+        # Upsampling operations
+        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+    
+    def forward(self, x):
+        # Encoder
+        enc1_out = F.relu(self.enc1(x))
+        pool1 = self.pool(enc1_out)
+        
+        enc2_out = F.relu(self.enc2(pool1))
+        pool2 = self.pool(enc2_out)
+        
+        enc3_out = F.relu(self.enc3(pool2))
+        pool3 = self.pool(enc3_out)
+        
+        # Bottleneck
+        bottleneck = F.relu(self.bottleneck(pool3))
+        
+        # Decoder with skip connections
+        up3 = self.up3(bottleneck)
+        if up3.shape != enc3_out.shape:
+            diff_h = enc3_out.size()[2] - up3.size()[2]
+            diff_w = enc3_out.size()[3] - up3.size()[3]
+            up3 = F.pad(up3, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
+        skip3 = torch.cat([up3, enc3_out], dim=1)
+        dec3_out = F.relu(self.dec3(skip3))
+        
+        up2 = self.up2(dec3_out)
+        if up2.shape != enc2_out.shape:
+            diff_h = enc2_out.size()[2] - up2.size()[2]
+            diff_w = enc2_out.size()[3] - up2.size()[3]
+            up2 = F.pad(up2, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
+        skip2 = torch.cat([up2, enc2_out], dim=1)
+        dec2_out = F.relu(self.dec2(skip2))
+        
+        up1 = self.up2(dec2_out)
+        if up1.shape != enc1_out.shape:
+            diff_h = enc1_out.size()[2] - up1.size()[2]
+            diff_w = enc1_out.size()[3] - up1.size()[3]
+            up1 = F.pad(up1, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
+        skip1 = torch.cat([up1, enc1_out], dim=1)
+        output = self.dec1(skip1)
+        
+        # Split the output into mean and logvar
+        mean, logvar = torch.chunk(output, 2, dim=1)
+        
+        return mean, logvar
+
 # This network is a convolutional neural network.
 # The input is a 28x28 image, and the output is a 28x28 image.
 # The output should be the mean and log variance of the posterior distribution.
 class PosteriorNetwork(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3):
         super(PosteriorNetwork, self).__init__()
         # the first convolutional layer should maintain the size of the image 
         # but increase the channel size to hidden_dim.
-        self.conv1 = nn.Conv2d(in_channels=input_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels=input_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
         # we repeat this for 4 times.
-        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
-        self.conv4 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
+        self.conv3 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
+        self.conv4 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
         # the final layer should reduce the channel size to 2.
-        self.conv_final = nn.Conv2d(in_channels=hidden_dim, out_channels=2, kernel_size=3, padding=1)
+        self.conv_final = nn.Conv2d(in_channels=hidden_dim, out_channels=2, kernel_size=kernel_size, padding='same')
 
     def forward(self, x):
         x = F.tanh(self.conv1(x))
-        x = F.tanh(self.conv2(x) + F.adaptive_avg_pool2d(x, 1)) + x
-        x = F.tanh(self.conv3(x) + F.adaptive_avg_pool2d(x, 1)) + x 
-        x = F.tanh(self.conv4(x) + F.adaptive_avg_pool2d(x, 1)) + x
+        x = F.tanh(self.conv2(x)) + x
+        x = F.tanh(self.conv3(x)) + x 
+        x = F.tanh(self.conv4(x)) + x
         x = self.conv_final(x)
 
         # the output should be the mean and log variance of the posterior distribution.
@@ -45,26 +115,109 @@ class PosteriorNetwork(nn.Module):
         return mean, logvar
 
 # Define the velocity field network.
+
+# Unet based implementation
+class VelocityFieldUNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3):
+        super(VelocityFieldUNet, self).__init__()
+        
+        # Encoder (downsampling path)
+        self.enc1 = nn.Conv2d(input_dim, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.temp_enc1 = nn.Linear(1, hidden_dim)
+        
+        self.enc2 = nn.Conv2d(hidden_dim, hidden_dim * 2, kernel_size=kernel_size, padding='same')
+        self.temp_enc2 = nn.Linear(1, hidden_dim * 2)
+        
+        self.enc3 = nn.Conv2d(hidden_dim * 2, hidden_dim * 4, kernel_size=kernel_size, padding='same')
+        self.temp_enc3 = nn.Linear(1, hidden_dim * 4)
+        
+        # Bottleneck
+        self.bottleneck = nn.Conv2d(hidden_dim * 4, hidden_dim * 4, kernel_size=kernel_size, padding='same')
+        self.temp_bottleneck = nn.Linear(1, hidden_dim * 4)
+        
+        # Decoder (upsampling path)
+        self.dec3 = nn.Conv2d(hidden_dim * 8, hidden_dim * 2, kernel_size=kernel_size, padding='same')
+        self.temp_dec3 = nn.Linear(1, hidden_dim * 2)
+        
+        self.dec2 = nn.Conv2d(hidden_dim * 4, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.temp_dec2 = nn.Linear(1, hidden_dim)
+        
+        self.dec1 = nn.Conv2d(hidden_dim * 2, input_dim, kernel_size=kernel_size, padding='same')
+        
+        # Max pooling for downsampling
+        self.pool = nn.MaxPool2d(2)
+        
+        # Upsampling operations
+        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+    
+    def forward(self, x, temperature):
+        if len(temperature.shape) == 1:
+            temperature = temperature.unsqueeze(-1)
+        
+        # Encoder
+        enc1_out = F.relu(self.enc1(x) + self.temp_enc1(temperature).unsqueeze(-1).unsqueeze(-1))
+        pool1 = self.pool(enc1_out)
+        
+        enc2_out = F.relu(self.enc2(pool1) + self.temp_enc2(temperature).unsqueeze(-1).unsqueeze(-1))
+        pool2 = self.pool(enc2_out)
+        
+        enc3_out = F.relu(self.enc3(pool2) + self.temp_enc3(temperature).unsqueeze(-1).unsqueeze(-1))
+        pool3 = self.pool(enc3_out)
+        
+        # Bottleneck
+        bottleneck = F.relu(self.bottleneck(pool3) + self.temp_bottleneck(temperature).unsqueeze(-1).unsqueeze(-1))
+        
+        # Decoder with skip connections
+        up3 = self.up3(bottleneck)
+        # Ensure the dimensions match for skip connections
+        # If dimensions don't match due to odd size, adjust with padding or cropping
+        if up3.shape != enc3_out.shape:
+            diff_h = enc3_out.size()[2] - up3.size()[2]
+            diff_w = enc3_out.size()[3] - up3.size()[3]
+            up3 = F.pad(up3, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
+        skip3 = torch.cat([up3, enc3_out], dim=1)
+        dec3_out = F.relu(self.dec3(skip3) + self.temp_dec3(temperature).unsqueeze(-1).unsqueeze(-1))
+        
+        up2 = self.up2(dec3_out)
+        if up2.shape != enc2_out.shape:
+            diff_h = enc2_out.size()[2] - up2.size()[2]
+            diff_w = enc2_out.size()[3] - up2.size()[3]
+            up2 = F.pad(up2, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
+        skip2 = torch.cat([up2, enc2_out], dim=1)
+        dec2_out = F.relu(self.dec2(skip2) + self.temp_dec2(temperature).unsqueeze(-1).unsqueeze(-1))
+        
+        # Final upsampling and convolution
+        up1 = self.up2(dec2_out)
+        if up1.shape != enc1_out.shape:
+            diff_h = enc1_out.size()[2] - up1.size()[2]
+            diff_w = enc1_out.size()[3] - up1.size()[3]
+            up1 = F.pad(up1, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
+        skip1 = torch.cat([up1, enc1_out], dim=1)
+        output = self.dec1(skip1)
+        
+        return output
+
 # This network is a convolutional neural network, just like the posterior network.
 # But, this network takes input the temperature t as well.
 # The output should be the velocity field.
 class VelocityFieldNetwork(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3):
         super(VelocityFieldNetwork, self).__init__()
         # the first convolutional layer should maintain the size of the image 
         # but increase the channel size to hidden_dim.
-        self.conv1 = nn.Conv2d(in_channels=input_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels=input_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
         # for each convolutional layer, we have a temperature projection layer.
         self.temp1 = nn.Linear(1, hidden_dim)
         # we repeat this for 4 times.
-        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
         self.temp2 = nn.Linear(1, hidden_dim)
-        self.conv3 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
         self.temp3 = nn.Linear(1, hidden_dim)
-        self.conv4 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv4 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=kernel_size, padding='same')
         self.temp4 = nn.Linear(1, hidden_dim)
         # the final layer should reduce the channel size to input_dim.
-        self.conv5 = nn.Conv2d(in_channels=hidden_dim, out_channels=input_dim, kernel_size=3, padding=1)
+        self.conv5 = nn.Conv2d(in_channels=hidden_dim, out_channels=input_dim, kernel_size=kernel_size, padding='same')
 
     def forward(self, x, temperature):
         if len(temperature.shape) == 1:
@@ -117,7 +270,11 @@ class CelebADataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
-            transform = transforms.Compose([transforms.ToTensor()])
+            # make the image size 64x64
+            transform = transforms.Compose([
+                transforms.Resize((64, 64)),
+                transforms.ToTensor()
+            ])
             self.train_dataset = datasets.CelebA(root='data', split='train', transform=transform)
             self.val_dataset = datasets.CelebA(root='data', split='test', transform=transform)
 
@@ -176,12 +333,16 @@ class VariationalFlowMatching(pl.LightningModule):
     def __init__(self, input_dim, 
                  hidden_dim, 
                  learning_rate, 
+                 kernel_size=3,
                  kl_weight=1.0,
                  visualization_interval=100,
                  image_size=(28, 28)):
         super(VariationalFlowMatching, self).__init__()
-        self.posterior = PosteriorNetwork(input_dim, hidden_dim)
-        self.velocity_field = VelocityFieldNetwork(input_dim, hidden_dim)
+        # self.posterior = PosteriorNetwork(input_dim, hidden_dim, kernel_size)
+        self.posterior = PosteriorUNet(input_dim, hidden_dim, kernel_size)
+        # self.velocity_field = VelocityFieldNetwork(input_dim, hidden_dim, kernel_size)
+        self.velocity_field = VelocityFieldUNet(input_dim, hidden_dim, kernel_size)
+        self.kernel_size = kernel_size
         self.learning_rate = learning_rate
         self.kl_weight = kl_weight
         self.input_dim = input_dim
@@ -253,8 +414,9 @@ if __name__ == "__main__":
         'batch_size': 8,
         'epochs': 100,
         'hidden_dim': 32,
+        'kernel_size': 4,
         'learning_rate': 1e-3,
-        'kl_weight': 1e-4, 
+        'kl_weight': 1e-3, 
         'visualization_interval': 100,
     }
 
@@ -271,6 +433,7 @@ if __name__ == "__main__":
     model = VariationalFlowMatching(input_dim=data_module.image_size()[0], 
                                     hidden_dim=config['hidden_dim'],
                                     learning_rate=config['learning_rate'],
+                                    kernel_size=config['kernel_size'],
                                     kl_weight=config['kl_weight'],
                                     image_size=data_module.image_size()[1:],
                                     visualization_interval=config['visualization_interval'])

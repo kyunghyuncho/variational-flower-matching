@@ -258,6 +258,17 @@ class VelocityFieldNetwork(nn.Module):
 
         return x
     
+# Prior network: this is just a Normal distribution
+class PriorNetwork(nn.Module):
+    def __init__(self, input_dim):
+        super(PriorNetwork, self).__init__()
+        self.input_dim = input_dim
+        self.mean = nn.Parameter(torch.zeros(input_dim))
+        self.logvar = nn.Parameter(torch.zeros(input_dim))
+
+    def forward(self, x):
+        return self.mean, self.logvar
+    
 # Let's define the MNIST Data Module: i'm using pytorch lightning.
 class MNISTDataModule(pl.LightningDataModule):
     def __init__(self, batch_size=32):
@@ -286,7 +297,7 @@ class MNISTDataModule(pl.LightningDataModule):
     
 # Let's define CelebA Data Module: i'm using pytorch lightning.
 class CelebADataModule(pl.LightningDataModule):
-    def __init__(self, batch_size=32, image_size=(32, 32)):
+    def __init__(self, batch_size=32, image_size=(28, 28)):
         super().__init__()
         self.batch_size = batch_size
         self.target_image_size = image_size
@@ -335,12 +346,6 @@ class SampleAndLogImagesCallback(Callback):
             samples = pl_module.sample(num_samples=self.num_samples)
             samples = samples.squeeze().cpu().numpy()
 
-            # let's print out some statistics about the pixel values of samples
-            print(f"Mean pixel value: {samples.mean()}")
-            print(f"Std pixel value: {samples.std()}")
-            print(f"Min pixel value: {samples.min()}")
-            print(f"Max pixel value: {samples.max()}")
-
             # Log the samples to wandb
             trainer.logger.experiment.log({
                 f"pixel_value_histogram": wandb.Histogram(samples.flatten())
@@ -356,8 +361,16 @@ class SampleAndLogImagesCallback(Callback):
             num_rows = math.ceil(np.sqrt(self.num_samples))
             num_cols = math.ceil(self.num_samples / num_rows)
 
-            for i in range(self.num_samples):
-                plt.subplot(num_rows, num_cols, i+1)
+            # the first subplot is the prior.
+            plt.subplot(num_rows, num_cols, 1)
+            if pl_module.prior.mean.shape[0] == 1:
+                plt.imshow(pl_module.prior.mean.squeeze().cpu().numpy(), cmap='gray')
+            else:
+                plt.imshow(pl_module.prior.mean.squeeze().cpu().numpy().transpose(1,2,0))
+            plt.axis('off')
+
+            for i in range(self.num_samples-1):
+                plt.subplot(num_rows, num_cols, i+2)
                 if len(samples[i].shape) < 3:
                     plt.imshow(samples[i], cmap='gray')
                 else:
@@ -381,9 +394,11 @@ class VariationalFlowMatching(pl.LightningModule):
                  learning_rate, 
                  kernel_size=3,
                  kl_weight=1.0,
+                 prior_weight=1.0,
                  visualization_interval=100,
                  image_size=(28, 28)):
         super(VariationalFlowMatching, self).__init__()
+        self.prior = PriorNetwork((input_dim, image_size[0], image_size[1]))
         # self.posterior = PosteriorNetwork(input_dim, hidden_dim, kernel_size)
         self.posterior = PosteriorUNet(input_dim, hidden_dim, kernel_size)
         # self.velocity_field = VelocityFieldNetwork(input_dim, hidden_dim, kernel_size)
@@ -391,6 +406,7 @@ class VariationalFlowMatching(pl.LightningModule):
         self.kernel_size = kernel_size
         self.learning_rate = learning_rate
         self.kl_weight = kl_weight
+        self.prior_weight = prior_weight
         self.input_dim = input_dim
         self.image_size = image_size
         self.visualization_interval = visualization_interval
@@ -413,23 +429,32 @@ class VariationalFlowMatching(pl.LightningModule):
         # compute the interpolated points.
         x_t = temperature[:,None,None,None] * z + (1 - temperature[:,None,None,None]) * x
 
-        # The velocity field for conditional Gaussian path
-        v_t_true = x - z
+        # compute the velocity field.
+        v_t_true = z - x
 
-        # predict the velocity field
+        # predict the final outcome.
         v_t_pred = self(x_t, temperature.unsqueeze(-1))
 
-        # compute the loss
+        # compute the loss: it should be the negative log-probability of v_t_true 
+        # under the Gaussian distribution with mean v_t_pred and variance 1.
         mse_loss = F.mse_loss(v_t_pred, v_t_true)
 
         # KL divergence from the approximater posterior to the prior.
-        # the prior is standard Normal.
-        kl_div = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
+        # the prior mean and logvar
+        prior_mean, prior_logvar = self.prior(x)
+        kl_div = -0.5 * torch.sum(1 + logvar 
+                                  - prior_logvar 
+                                  - (logvar.exp() 
+                                     + (mean - prior_mean).pow(2)) / prior_logvar.exp())
 
-        # the loss is the sum of the MSE loss and KL divergence.
-        loss = mse_loss + self.kl_weight * kl_div
+        # another loss that fits the prior to the data.
+        # this is the negative log-probability of x under the prior.
+        prior_loss = 0.5 * torch.sum((x - prior_mean).pow(2) / prior_logvar.exp() + prior_logvar)
 
-        self.log('train_loss', loss)
+        # the loss is the sum of the MSE loss, KL divergence and the prior loss.
+        loss = mse_loss + self.kl_weight * kl_div + self.prior_weight * prior_loss
+
+        self.log('train_loss', loss, prog_bar=True)
         self.log('kl_div', kl_div)
         self.log('mse_loss', mse_loss)
 
@@ -441,30 +466,33 @@ class VariationalFlowMatching(pl.LightningModule):
     
     def sample(self, num_samples=16, num_steps=100):
         x_t = torch.randn(num_samples, self.input_dim, self.image_size[0], self.image_size[1], device=self.device)
-        
+
+        prior_mean, prior_logvar = self.prior(x_t)
+        z0 = prior_mean.unsqueeze(0) + torch.exp(0.5 * prior_logvar.unsqueeze(0)) * x_t
+        x_t = z0
+        t = torch.ones(num_samples, device=self.device)
+
         dt = 1.0 / num_steps
         for i in range(num_steps):
-            t = torch.ones(num_samples, device=self.device) * (1 - (i * dt))
-            v_t_predicted = self(x_t, t)  # Predict the velocity at the current point
-
-            # Predict the next step using Euler's method
-            x_t_predicted = x_t + v_t_predicted * dt
-            t_next = torch.ones(num_samples, device=self.device) * (1 - ((i + 1) * dt))
-            v_t_next_predicted = self(x_t_predicted, t_next) # Predict the velocity at the predicted next point
-
-            # Correct the step using the average of the two velocities
-            x_t = x_t + 0.5 * (v_t_predicted + v_t_next_predicted) * dt
+            # compute the velocity field
+            velocity_field = self.velocity_field(x_t, t)
+            # update the samples
+            x_t = x_t - dt * velocity_field
+            # compute the temperature
+            t = t - dt
+            t = torch.clamp(t, 0, 1)
 
         return x_t
 
 if __name__ == "__main__":
     config = {
-        'batch_size': 4,
+        'batch_size': 64,
         'epochs': 100,
-        'hidden_dim': 128,
+        'hidden_dim': 32,
         'kernel_size': 6, 
-        'learning_rate': 1e-5, #1e-3,
+        'learning_rate': 1e-3,
         'kl_weight': 1,
+        'prior_weight': 1,
         'visualization_interval': 100,
         'gradient_clip_val': 1.
     }
@@ -484,6 +512,7 @@ if __name__ == "__main__":
                                     learning_rate=config['learning_rate'],
                                     kernel_size=config['kernel_size'],
                                     kl_weight=config['kl_weight'],
+                                    prior_weight=config['prior_weight'],
                                     image_size=data_module.image_size()[1:],
                                     visualization_interval=config['visualization_interval'])
 

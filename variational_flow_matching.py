@@ -488,12 +488,12 @@ if __name__ == "__main__":
     config = {
         'batch_size': 64,
         'epochs': 100,
-        'hidden_dim': 32,
-        'kernel_size': 6, 
+        'hidden_dim': 64,
+        'kernel_size': 4, 
         'learning_rate': 1e-3,
         'kl_weight': 1,
         'prior_weight': 1,
-        'visualization_interval': 100,
+        'visualization_interval': 1000,
         'gradient_clip_val': 1.
     }
 
@@ -503,8 +503,8 @@ if __name__ == "__main__":
     wandb.init(project='variational-flow-matching')
 
     # initialize the data module
-    # data_module = MNISTDataModule(batch_size=config['batch_size'])
-    data_module = CelebADataModule(batch_size=config['batch_size'])
+    data_module = MNISTDataModule(batch_size=config['batch_size'])
+    # data_module = CelebADataModule(batch_size=config['batch_size'])
 
     # initialize the model
     model = VariationalFlowMatching(input_dim=data_module.image_size()[0], 

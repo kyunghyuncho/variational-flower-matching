@@ -1,0 +1,6 @@
+torch
+torchvision
+lightning
+matplotlib
+wandb
+gdown

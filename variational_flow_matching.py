@@ -304,8 +304,8 @@ class CelebADataModule(pl.LightningDataModule):
 
     def prepare_data(self):
         # download the data
-        datasets.CelebA(root='data', split='train', download=True)
-        datasets.CelebA(root='data', split='test', download=True)
+        datasets.CelebA(root='/teamspace/s3_folders/', split='train', download=True)
+        datasets.CelebA(root='/teamspace/s3_folders/', split='test', download=True)
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
@@ -324,6 +324,37 @@ class CelebADataModule(pl.LightningDataModule):
     
     def image_size(self):
         return (3, *self.target_image_size)
+
+# Let's define SVHN Data Module: i'm using pytorch lightning.
+class SVHNDataModule(pl.LightningDataModule):
+    def __init__(self, batch_size=32, image_size=(32, 32)):
+        super().__init__()
+        self.batch_size = batch_size
+        self.target_image_size = image_size
+
+    def prepare_data(self):
+        # download the data
+        datasets.SVHN(root='data', split='train', download=True)
+        datasets.SVHN(root='data', split='test', download=True)
+
+    def setup(self, stage=None):
+        if stage == 'fit' or stage is None:
+            transform = transforms.Compose([
+                transforms.Resize(self.target_image_size),
+                transforms.ToTensor()
+            ])
+            self.train_dataset = datasets.SVHN(root='data', split='train', transform=transform, download=True)
+            self.val_dataset = datasets.SVHN(root='data', split='test', transform=transform, download=True)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.batch_size)
+    
+    def image_size(self):
+        return (3, *self.target_image_size)
+
     
 # Define a callback to sample and log images
 class SampleAndLogImagesCallback(Callback):
@@ -503,7 +534,8 @@ if __name__ == "__main__":
     wandb.init(project='variational-flow-matching')
 
     # initialize the data module
-    data_module = MNISTDataModule(batch_size=config['batch_size'])
+    # data_module = MNISTDataModule(batch_size=config['batch_size'])
+    data_module = SVHNDataModule(batch_size=config['batch_size'])
     # data_module = CelebADataModule(batch_size=config['batch_size'])
 
     # initialize the model

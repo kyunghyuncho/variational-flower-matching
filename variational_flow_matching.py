@@ -581,6 +581,83 @@ class STL10DataModule(pl.LightningDataModule):
 
     def image_size(self):
         return (3, *self.target_image_size)
+
+# CIFAR100 Data Module
+class CIFAR100DataModule(pl.LightningDataModule):
+    def __init__(self, batch_size=32, image_size=(32, 32)):
+        super().__init__()
+        self.batch_size = batch_size
+        self.target_image_size = image_size
+
+    def prepare_data(self):
+        # Download the data
+        datasets.CIFAR100(root='data', train=True, download=True)
+        datasets.CIFAR100(root='data', train=False, download=True)
+
+    def setup(self, stage=None):
+        # Define transforms
+        self.transform = transforms.Compose([
+            transforms.Resize(self.target_image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))  # CIFAR100 stats
+        ])
+
+        # Load train and test datasets with transforms
+        if stage == 'fit' or stage is None:
+            self.train_dataset = datasets.CIFAR100(
+                root='data',
+                train=True,
+                transform=self.transform,
+                download=False
+            )
+
+        if stage == 'test' or stage is None:
+            self.test_dataset = datasets.CIFAR100(
+                root='data',
+                train=False,
+                transform=self.transform,
+                download=False
+            )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True
+        )
+
+    def val_dataloader(self):
+        # Create a validation set from 10% of the training data
+        val_size = int(0.1 * len(self.train_dataset))
+        train_size = len(self.train_dataset) - val_size
+        
+        train_subset, val_subset = random_split(
+            self.train_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)
+        )
+        
+        return DataLoader(
+            val_subset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
+
+    def image_size(self):
+        return (3, *self.target_image_size)
     
 # Define a callback to sample and log images
 class SampleAndLogImagesCallback(Callback):
@@ -753,7 +830,7 @@ if __name__ == "__main__":
         'learning_rate': 1e-3,
         'kl_weight': 1,
         'prior_weight': 1,
-        'visualization_interval': 500,
+        'visualization_interval': 1000,
         'gradient_clip_val': 1.,
         'sigma_real': 0.1,
     }
@@ -765,8 +842,9 @@ if __name__ == "__main__":
 
     # initialize the data module
     # data_module = MNISTDataModule(batch_size=config['batch_size'])
-    data_module = SVHNDataModule(batch_size=config['batch_size'])
+    # data_module = SVHNDataModule(batch_size=config['batch_size'])
     # data_module = CelebADataModule(batch_size=config['batch_size'])
+    data_module = CIFAR100DataModule(batch_size=config['batch_size'])
     # data_module = STL10DataModule(batch_size=config['batch_size'])
 
     # initialize the model

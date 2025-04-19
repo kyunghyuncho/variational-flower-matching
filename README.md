@@ -17,3 +17,5 @@ even after these, i noticed that my code would work reasonably for some datasets
 so, here it is. this code seems to be the minimal working one for **variational flow matching based generative models**.
 
 i should write a full blog post at some point ... but i'm lazy, and the sun is too good outside!
+
+p.s. of course, i was working on this little by little here and there whenever i had time. with such a lack of focus, i made a ton of mistakes here and there and also were misled by Gemini and Claude non-stop here and there. only if i could list up all those dumb things i tried ... 

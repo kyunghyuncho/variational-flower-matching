@@ -2,7 +2,7 @@
 
 [Kyunghyun Cho](https://meet.kyunghyuncho.me/)
 
-so, i got curious about [flow matching](https://arxiv.org/abs/2210.02747) after listening to the talk by [Ricky](https://rtqichen.github.io/). i decided to give it a try myself. without Gemini on my side, i had no fear.
+so, i got curious about [flow matching](https://arxiv.org/abs/2210.02747) after listening to the talk by [Ricky](https://rtqichen.github.io/). i decided to give it a try myself. with Gemini on my side, i had no fear.
 
 i started with a vanilla flow matching based generative model, where i used a vanilla convolutional network. i tested it with MNIST and CelebA. it wasn't as easy as i thought it would be to train these models. perhaps, it is not surprising, since i suspect that a lot of learning updates are wasted as they cancel each other. consider two inputs $x_1$ and $x_2$. we then sample $z_1$ and $z_2$ from a prior distribution. because they are sampled independently from the same, shared distribution, $z_1$ and $z_2$ are exchangeable. two updates that correspond to $(x_1,z_1), (x_2,z_2)$ and $(x_1,z_2), (x_2,z_1)$ will thus cancel each other.
 

@@ -703,7 +703,7 @@ class VariationalFlowMatching(pl.LightningModule):
         kl_div = -0.5 * torch.sum(1 + logvar 
                                   - prior_logvar 
                                   - (logvar.exp() 
-                                     + (mean - prior_mean).pow(2)) / prior_logvar.exp())
+                                     + (mean - prior_mean.detach()).pow(2)) / prior_logvar.detach().exp())
 
         # another loss that fits the prior to the data.
         # this is the negative log-probability of x under the prior.
@@ -747,7 +747,7 @@ if __name__ == "__main__":
         'batch_size': 64,
         'epochs': 100,
         'hidden_dim': 128,
-        'kernel_size': 4, 
+        'kernel_size': 3, 
         'learning_rate': 1e-3,
         'kl_weight': 1,
         'prior_weight': 1,

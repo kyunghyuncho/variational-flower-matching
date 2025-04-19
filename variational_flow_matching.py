@@ -579,7 +579,6 @@ class STL10DataModule(pl.LightningDataModule):
             pin_memory=True
         )
 
-    @property
     def image_size(self):
         return (3, *self.target_image_size)
     
@@ -649,7 +648,8 @@ class SampleAndLogImagesCallback(Callback):
 class VariationalFlowMatching(pl.LightningModule):
     def __init__(self, input_dim, 
                  hidden_dim, 
-                 learning_rate, 
+                 learning_rate,
+                 sigma_real=0., 
                  kernel_size=3,
                  kl_weight=1.0,
                  prior_weight=1.0,
@@ -663,6 +663,7 @@ class VariationalFlowMatching(pl.LightningModule):
         self.velocity_field = VelocityFieldUNet(input_dim, hidden_dim, kernel_size, image_size)
         self.kernel_size = kernel_size
         self.learning_rate = learning_rate
+        self.sigma_real = sigma_real
         self.kl_weight = kl_weight
         self.prior_weight = prior_weight
         self.input_dim = input_dim
@@ -687,8 +688,9 @@ class VariationalFlowMatching(pl.LightningModule):
         # compute the interpolated points.
         x_t = temperature[:,None,None,None] * z + (1 - temperature[:,None,None,None]) * x
 
-        # compute the velocity field.
-        v_t_true = z - x
+        # compute the velocity field incorporating data uncertainty sigma_0
+        # v_t_true = z - x 
+        v_t_true = (z - x) + self.sigma_real / logvar.exp().sqrt() * (z - mean)
 
         # predict the final outcome.
         v_t_pred = self(x_t, temperature.unsqueeze(-1))
@@ -751,8 +753,9 @@ if __name__ == "__main__":
         'learning_rate': 1e-3,
         'kl_weight': 1,
         'prior_weight': 1,
-        'visualization_interval': 1000,
-        'gradient_clip_val': 1.
+        'visualization_interval': 500,
+        'gradient_clip_val': 1.,
+        'sigma_real': 0.1,
     }
 
     wandb.finish()
@@ -770,6 +773,7 @@ if __name__ == "__main__":
     model = VariationalFlowMatching(input_dim=data_module.image_size()[0], 
                                     hidden_dim=config['hidden_dim'],
                                     learning_rate=config['learning_rate'],
+                                    sigma_real=config['sigma_real'],
                                     kernel_size=config['kernel_size'],
                                     kl_weight=config['kl_weight'],
                                     prior_weight=config['prior_weight'],

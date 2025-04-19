@@ -18,13 +18,30 @@ from pytorch_lightning.callbacks import Callback
 
 # Define the posterior network.
 # Unet based network
+# Define the posterior network.
+# Unet based network
 class PosteriorUNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size=3):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3, image_size=None):
         super(PosteriorUNet, self).__init__()
+        
+        # Calculate max possible depth based on image size
+        if image_size is not None:
+            # Assuming image_size is a tuple (height, width) or a single int
+            if isinstance(image_size, int):
+                height = width = image_size
+            else:
+                height, width = image_size
+                
+            self.max_depth = min(int(np.log2(height)), int(np.log2(width)))
+        else:
+            # Default to maximum 6 layers if image size not provided
+            self.max_depth = 6
+            
+        print(f"Initializing Posterior U-Net with maximum depth: {self.max_depth}")
         
         # Encoder (downsampling path)
         self.enc1 = nn.Conv2d(input_dim, hidden_dim, kernel_size=kernel_size, padding='same')
-        self.enc1_norm = nn.GroupNorm(1, hidden_dim)  # GroupNorm with 1 group
+        self.enc1_norm = nn.GroupNorm(1, hidden_dim)
         
         self.enc2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding='same')
         self.enc2_norm = nn.GroupNorm(1, hidden_dim)
@@ -32,74 +49,135 @@ class PosteriorUNet(nn.Module):
         self.enc3 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding='same')
         self.enc3_norm = nn.GroupNorm(1, hidden_dim)
         
+        # Additional encoder layers - will only be used if max_depth allows
+        self.enc4 = nn.Conv2d(hidden_dim, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.enc4_norm = nn.GroupNorm(1, hidden_dim*2)
+        
+        self.enc5 = nn.Conv2d(hidden_dim*2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.enc5_norm = nn.GroupNorm(1, hidden_dim*2)
+        
+        self.enc6 = nn.Conv2d(hidden_dim*2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.enc6_norm = nn.GroupNorm(1, hidden_dim*2)
+        
         # Bottleneck
-        self.bottleneck_conv = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding='same')
-        self.bottleneck_norm = nn.GroupNorm(1, hidden_dim)
-        self.global_pool = nn.AdaptiveAvgPool2d(1)  # Global average pooling
-        self.bottleneck_fc = nn.Linear(hidden_dim, hidden_dim)  # Fully connected layer
-        self.bottleneck_expand = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)  # Expand back
+        self.bottleneck_conv = nn.Conv2d(hidden_dim*2 if self.max_depth > 3 else hidden_dim, 
+                                        hidden_dim*2 if self.max_depth > 3 else hidden_dim, 
+                                        kernel_size=kernel_size, padding='same')
+        self.bottleneck_norm = nn.GroupNorm(1, hidden_dim*2 if self.max_depth > 3 else hidden_dim)
         
         # Decoder (upsampling path)
+        self.dec6 = nn.Conv2d(hidden_dim*2 * 2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.dec6_norm = nn.GroupNorm(1, hidden_dim*2)
+        
+        self.dec5 = nn.Conv2d(hidden_dim*2 * 2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.dec5_norm = nn.GroupNorm(1, hidden_dim*2)
+        
+        self.dec4 = nn.Conv2d(hidden_dim*2 * 2, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.dec4_norm = nn.GroupNorm(1, hidden_dim)
+        
         self.dec3 = nn.Conv2d(hidden_dim * 2, hidden_dim, kernel_size=kernel_size, padding='same')
         self.dec3_norm = nn.GroupNorm(1, hidden_dim)
         
         self.dec2 = nn.Conv2d(hidden_dim * 2, hidden_dim, kernel_size=kernel_size, padding='same')
         self.dec2_norm = nn.GroupNorm(1, hidden_dim)
         
-        self.dec1 = nn.Conv2d(hidden_dim * 2, 2, kernel_size=kernel_size, padding='same')
+        self.dec1 = nn.Conv2d(hidden_dim * 2, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.dec1_norm = nn.GroupNorm(1, hidden_dim)
+        
+        # Output layers for mean and log variance
+        self.mean_output = nn.Conv2d(hidden_dim, input_dim, kernel_size=1)
+        self.logvar_output = nn.Conv2d(hidden_dim, input_dim, kernel_size=1)
         
         # Max pooling for downsampling
         self.pool = nn.MaxPool2d(2)
         
         # Upsampling operations
-        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
     
     def forward(self, x):
-        # Encoder
+        # Store encoder outputs for skip connections
+        enc_outputs = []
+        
+        # Encoder path - first 3 layers are always used
         enc1_out = F.relu(self.enc1_norm(self.enc1(x)))
-        pool1 = self.pool(enc1_out)
+        enc_outputs.append(enc1_out)
+        pool = self.pool(enc1_out)
         
-        enc2_out = F.relu(self.enc2_norm(self.enc2(pool1)))
-        pool2 = self.pool(enc2_out)
+        enc2_out = F.relu(self.enc2_norm(self.enc2(pool)))
+        enc_outputs.append(enc2_out)
+        pool = self.pool(enc2_out)
         
-        enc3_out = F.relu(self.enc3_norm(self.enc3(pool2)))
-        pool3 = self.pool(enc3_out)
+        enc3_out = F.relu(self.enc3_norm(self.enc3(pool)))
+        enc_outputs.append(enc3_out)
+        pool = self.pool(enc3_out)
         
-        # Bottleneck with global pooling
-        bottleneck = F.relu(self.bottleneck_norm(self.bottleneck_conv(pool3)))
-        global_features = self.global_pool(bottleneck).squeeze(-1).squeeze(-1)  # Global pooling
-        global_features = F.relu(self.bottleneck_fc(global_features))  # Fully connected layer
-        global_features = global_features.unsqueeze(-1).unsqueeze(-1)  # Expand dimensions
-        bottleneck = self.bottleneck_expand(global_features) + bottleneck  # Combine global and local features
+        # Additional encoder layers if depth allows
+        if self.max_depth > 3:
+            enc4_out = F.relu(self.enc4_norm(self.enc4(pool)))
+            enc_outputs.append(enc4_out)
+            pool = self.pool(enc4_out)
         
-        # Decoder with skip connections
-        up3 = self.up3(bottleneck)
-        if up3.shape != enc3_out.shape:
-            diff_h = enc3_out.size()[2] - up3.size()[2]
-            diff_w = enc3_out.size()[3] - up3.size()[3]
-            up3 = F.pad(up3, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
-        skip3 = torch.cat([up3, enc3_out], dim=1)
-        dec3_out = F.relu(self.dec3_norm(self.dec3(skip3)))
+            if self.max_depth > 4:
+                enc5_out = F.relu(self.enc5_norm(self.enc5(pool)))
+                enc_outputs.append(enc5_out)
+                pool = self.pool(enc5_out)
+            
+                if self.max_depth > 5:
+                    enc6_out = F.relu(self.enc6_norm(self.enc6(pool)))
+                    enc_outputs.append(enc6_out)
+                    pool = self.pool(enc6_out)
         
-        up2 = self.up2(dec3_out)
-        if up2.shape != enc2_out.shape:
-            diff_h = enc2_out.size()[2] - up2.size()[2]
-            diff_w = enc2_out.size()[3] - up2.size()[3]
-            up2 = F.pad(up2, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
-        skip2 = torch.cat([up2, enc2_out], dim=1)
-        dec2_out = F.relu(self.dec2_norm(self.dec2(skip2)))
+        # Bottleneck
+        bottleneck = F.relu(self.bottleneck_norm(self.bottleneck_conv(pool)))
         
-        up1 = self.up2(dec2_out)
-        if up1.shape != enc1_out.shape:
-            diff_h = enc1_out.size()[2] - up1.size()[2]
-            diff_w = enc1_out.size()[3] - up1.size()[3]
-            up1 = F.pad(up1, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
-        skip1 = torch.cat([up1, enc1_out], dim=1)
-        output = self.dec1(skip1)
+        # Decoder path
+        x = bottleneck
         
-        # Split the output into mean and logvar
-        mean, logvar = torch.chunk(output, 2, dim=1)
+        # Additional decoder layers if depth allows
+        if self.max_depth > 5:
+            x = self.up(x)
+            # Handle potential size mismatch
+            if x.shape[2:] != enc_outputs[-1].shape[2:]:
+                x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, enc_outputs.pop()], dim=1)
+            x = F.relu(self.dec6_norm(self.dec6(x)))
+        
+        if self.max_depth > 4:
+            x = self.up(x)
+            if x.shape[2:] != enc_outputs[-1].shape[2:]:
+                x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, enc_outputs.pop()], dim=1)
+            x = F.relu(self.dec5_norm(self.dec5(x)))
+        
+        if self.max_depth > 3:
+            x = self.up(x)
+            if x.shape[2:] != enc_outputs[-1].shape[2:]:
+                x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, enc_outputs.pop()], dim=1)
+            x = F.relu(self.dec4_norm(self.dec4(x)))
+        
+        # Original decoder layers - always used
+        x = self.up(x)
+        if x.shape[2:] != enc_outputs[-1].shape[2:]:
+            x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+        x = torch.cat([x, enc_outputs.pop()], dim=1)
+        x = F.relu(self.dec3_norm(self.dec3(x)))
+        
+        x = self.up(x)
+        if x.shape[2:] != enc_outputs[-1].shape[2:]:
+            x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+        x = torch.cat([x, enc_outputs.pop()], dim=1)
+        x = F.relu(self.dec2_norm(self.dec2(x)))
+        
+        x = self.up(x)
+        if x.shape[2:] != enc_outputs[-1].shape[2:]:
+            x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+        x = torch.cat([x, enc_outputs.pop()], dim=1)
+        x = F.relu(self.dec1_norm(self.dec1(x)))
+        
+        # Output mean and log variance
+        mean = self.mean_output(x)
+        logvar = self.logvar_output(x)
         
         return mean, logvar
     
@@ -135,12 +213,27 @@ class PosteriorNetwork(nn.Module):
 
 # Unet based implementation
 class VelocityFieldUNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size=3):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3, image_size=None):
         super(VelocityFieldUNet, self).__init__()
+        
+        # Calculate max possible depth based on image size
+        if image_size is not None:
+            # Assuming image_size is a tuple (height, width) or a single int
+            if isinstance(image_size, int):
+                height = width = image_size
+            else:
+                height, width = image_size
+                
+            self.max_depth = min(int(np.log2(height)), int(np.log2(width)))
+        else:
+            # Default to maximum 6 layers if image size not provided
+            self.max_depth = 6
+            
+        print(f"Initializing U-Net with maximum depth: {self.max_depth}")
         
         # Encoder (downsampling path)
         self.enc1 = nn.Conv2d(input_dim, hidden_dim, kernel_size=kernel_size, padding='same')
-        self.enc1_norm = nn.GroupNorm(1, hidden_dim)  # GroupNorm with 1 group
+        self.enc1_norm = nn.GroupNorm(1, hidden_dim)
         self.temp_enc1 = nn.Linear(1, hidden_dim)
         
         self.enc2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding='same')
@@ -151,14 +244,44 @@ class VelocityFieldUNet(nn.Module):
         self.enc3_norm = nn.GroupNorm(1, hidden_dim)
         self.temp_enc3 = nn.Linear(1, hidden_dim)
         
-        # Bottleneck
-        self.bottleneck_conv = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding='same')
-        self.bottleneck_norm = nn.GroupNorm(1, hidden_dim)
-        self.global_pool = nn.AdaptiveAvgPool2d(1)  # Global average pooling
-        self.bottleneck_fc = nn.Linear(hidden_dim, hidden_dim)  # Fully connected layer
-        self.bottleneck_expand = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)  # Expand back
+        # Additional encoder layers - will only be used if max_depth allows
+        self.enc4 = nn.Conv2d(hidden_dim, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.enc4_norm = nn.GroupNorm(1, hidden_dim*2)
+        self.temp_enc4 = nn.Linear(1, hidden_dim*2)
         
-        # Decoder (upsampling path)
+        self.enc5 = nn.Conv2d(hidden_dim*2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.enc5_norm = nn.GroupNorm(1, hidden_dim*2)
+        self.temp_enc5 = nn.Linear(1, hidden_dim*2)
+        
+        self.enc6 = nn.Conv2d(hidden_dim*2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.enc6_norm = nn.GroupNorm(1, hidden_dim*2)
+        self.temp_enc6 = nn.Linear(1, hidden_dim*2)
+        
+        # Bottleneck
+        self.bottleneck_conv = nn.Conv2d(hidden_dim*2 if self.max_depth > 3 else hidden_dim, 
+                                         hidden_dim*2 if self.max_depth > 3 else hidden_dim, 
+                                         kernel_size=kernel_size, padding='same')
+        self.bottleneck_norm = nn.GroupNorm(1, hidden_dim*2 if self.max_depth > 3 else hidden_dim)
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.bottleneck_fc = nn.Linear(hidden_dim*2 if self.max_depth > 3 else hidden_dim, 
+                                       hidden_dim*2 if self.max_depth > 3 else hidden_dim)
+        self.bottleneck_expand = nn.Conv2d(hidden_dim*2 if self.max_depth > 3 else hidden_dim, 
+                                          hidden_dim*2 if self.max_depth > 3 else hidden_dim, kernel_size=1)
+        
+        # Decoder (upsampling path) - corresponding to encoder layers
+        # Will be selected dynamically based on max_depth
+        self.dec6 = nn.Conv2d(hidden_dim*2 * 2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.dec6_norm = nn.GroupNorm(1, hidden_dim*2)
+        self.temp_dec6 = nn.Linear(1, hidden_dim*2)
+        
+        self.dec5 = nn.Conv2d(hidden_dim*2 * 2, hidden_dim*2, kernel_size=kernel_size, padding='same')
+        self.dec5_norm = nn.GroupNorm(1, hidden_dim*2)
+        self.temp_dec5 = nn.Linear(1, hidden_dim*2)
+        
+        self.dec4 = nn.Conv2d(hidden_dim*2 * 2, hidden_dim, kernel_size=kernel_size, padding='same')
+        self.dec4_norm = nn.GroupNorm(1, hidden_dim)
+        self.temp_dec4 = nn.Linear(1, hidden_dim)
+        
         self.dec3 = nn.Conv2d(hidden_dim * 2, hidden_dim, kernel_size=kernel_size, padding='same')
         self.dec3_norm = nn.GroupNorm(1, hidden_dim)
         self.temp_dec3 = nn.Linear(1, hidden_dim)
@@ -173,57 +296,100 @@ class VelocityFieldUNet(nn.Module):
         self.pool = nn.MaxPool2d(2)
         
         # Upsampling operations
-        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
     
     def forward(self, x, temperature):
         if len(temperature.shape) == 1:
             temperature = temperature.unsqueeze(-1)
         
-        # Encoder
+        # Store encoder outputs for skip connections
+        enc_outputs = []
+        
+        # Encoder path - first 3 layers are always used
         enc1_out = F.relu(self.enc1_norm(self.enc1(x) + self.temp_enc1(temperature).unsqueeze(-1).unsqueeze(-1)))
-        pool1 = self.pool(enc1_out)
+        enc_outputs.append(enc1_out)
+        pool = self.pool(enc1_out)
         
-        enc2_out = F.relu(self.enc2_norm(self.enc2(pool1) + self.temp_enc2(temperature).unsqueeze(-1).unsqueeze(-1)))
-        pool2 = self.pool(enc2_out)
+        enc2_out = F.relu(self.enc2_norm(self.enc2(pool) + self.temp_enc2(temperature).unsqueeze(-1).unsqueeze(-1)))
+        enc_outputs.append(enc2_out)
+        pool = self.pool(enc2_out)
         
-        enc3_out = F.relu(self.enc3_norm(self.enc3(pool2) + self.temp_enc3(temperature).unsqueeze(-1).unsqueeze(-1)))
-        pool3 = self.pool(enc3_out)
+        enc3_out = F.relu(self.enc3_norm(self.enc3(pool) + self.temp_enc3(temperature).unsqueeze(-1).unsqueeze(-1)))
+        enc_outputs.append(enc3_out)
+        pool = self.pool(enc3_out)
         
-        # Bottleneck with global pooling
-        bottleneck = F.relu(self.bottleneck_norm(self.bottleneck_conv(pool3) + self.temp_enc3(temperature).unsqueeze(-1).unsqueeze(-1)))
-        global_features = self.global_pool(bottleneck).squeeze(-1).squeeze(-1)  # Global pooling
-        global_features = F.relu(self.bottleneck_fc(global_features))  # Fully connected layer
-        global_features = global_features.unsqueeze(-1).unsqueeze(-1)  # Expand dimensions
-        bottleneck = self.bottleneck_expand(global_features) + bottleneck  # Combine global and local features
+        # Additional encoder layers if depth allows
+        if self.max_depth > 3:
+            enc4_out = F.relu(self.enc4_norm(self.enc4(pool) + self.temp_enc4(temperature).unsqueeze(-1).unsqueeze(-1)))
+            enc_outputs.append(enc4_out)
+            pool = self.pool(enc4_out)
         
-        # Decoder with skip connections
-        up3 = self.up3(bottleneck)
-        if up3.shape != enc3_out.shape:
-            diff_h = enc3_out.size()[2] - up3.size()[2]
-            diff_w = enc3_out.size()[3] - up3.size()[3]
-            up3 = F.pad(up3, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
-        skip3 = torch.cat([up3, enc3_out], dim=1)
-        dec3_out = F.relu(self.dec3_norm(self.dec3(skip3) + self.temp_dec3(temperature).unsqueeze(-1).unsqueeze(-1)))
+            if self.max_depth > 4:
+                enc5_out = F.relu(self.enc5_norm(self.enc5(pool) + self.temp_enc5(temperature).unsqueeze(-1).unsqueeze(-1)))
+                enc_outputs.append(enc5_out)
+                pool = self.pool(enc5_out)
+            
+                if self.max_depth > 5:
+                    enc6_out = F.relu(self.enc6_norm(self.enc6(pool) + self.temp_enc6(temperature).unsqueeze(-1).unsqueeze(-1)))
+                    enc_outputs.append(enc6_out)
+                    pool = self.pool(enc6_out)
         
-        up2 = self.up2(dec3_out)
-        if up2.shape != enc2_out.shape:
-            diff_h = enc2_out.size()[2] - up2.size()[2]
-            diff_w = enc2_out.size()[3] - up2.size()[3]
-            up2 = F.pad(up2, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
-        skip2 = torch.cat([up2, enc2_out], dim=1)
-        dec2_out = F.relu(self.dec2_norm(self.dec2(skip2) + self.temp_dec2(temperature).unsqueeze(-1).unsqueeze(-1)))
+        # Bottleneck
+        bottleneck = F.relu(self.bottleneck_norm(self.bottleneck_conv(pool) + 
+                                               self.temp_enc3(temperature).unsqueeze(-1).unsqueeze(-1) if self.max_depth <= 3 else
+                                               self.temp_enc6(temperature).unsqueeze(-1).unsqueeze(-1)))
         
-        # Final upsampling and convolution
-        up1 = self.up2(dec2_out)
-        if up1.shape != enc1_out.shape:
-            diff_h = enc1_out.size()[2] - up1.size()[2]
-            diff_w = enc1_out.size()[3] - up1.size()[3]
-            up1 = F.pad(up1, [diff_w//2, diff_w-diff_w//2, diff_h//2, diff_h-diff_h//2])
-        skip1 = torch.cat([up1, enc1_out], dim=1)
-        output = self.dec1(skip1)
+        global_features = self.global_pool(bottleneck).squeeze(-1).squeeze(-1)
+        global_features = F.relu(self.bottleneck_fc(global_features))
+        global_features = global_features.unsqueeze(-1).unsqueeze(-1)
+        bottleneck = self.bottleneck_expand(global_features) + bottleneck
         
-        return output
+        # Decoder path
+        x = bottleneck
+        
+        # Additional decoder layers if depth allows
+        if self.max_depth > 5:
+            x = self.up(x)
+            # Handle potential size mismatch
+            if x.shape[2:] != enc_outputs[-1].shape[2:]:
+                x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, enc_outputs.pop()], dim=1)
+            x = F.relu(self.dec6_norm(self.dec6(x) + self.temp_dec6(temperature).unsqueeze(-1).unsqueeze(-1)))
+        
+        if self.max_depth > 4:
+            x = self.up(x)
+            if x.shape[2:] != enc_outputs[-1].shape[2:]:
+                x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, enc_outputs.pop()], dim=1)
+            x = F.relu(self.dec5_norm(self.dec5(x) + self.temp_dec5(temperature).unsqueeze(-1).unsqueeze(-1)))
+        
+        if self.max_depth > 3:
+            x = self.up(x)
+            if x.shape[2:] != enc_outputs[-1].shape[2:]:
+                x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, enc_outputs.pop()], dim=1)
+            x = F.relu(self.dec4_norm(self.dec4(x) + self.temp_dec4(temperature).unsqueeze(-1).unsqueeze(-1)))
+        
+        # Original decoder layers - always used
+        x = self.up(x)
+        if x.shape[2:] != enc_outputs[-1].shape[2:]:
+            x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+        x = torch.cat([x, enc_outputs.pop()], dim=1)
+        x = F.relu(self.dec3_norm(self.dec3(x) + self.temp_dec3(temperature).unsqueeze(-1).unsqueeze(-1)))
+        
+        x = self.up(x)
+        if x.shape[2:] != enc_outputs[-1].shape[2:]:
+            x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+        x = torch.cat([x, enc_outputs.pop()], dim=1)
+        x = F.relu(self.dec2_norm(self.dec2(x) + self.temp_dec2(temperature).unsqueeze(-1).unsqueeze(-1)))
+        
+        x = self.up(x)
+        if x.shape[2:] != enc_outputs[-1].shape[2:]:
+            x = F.interpolate(x, size=enc_outputs[-1].shape[2:], mode='bilinear', align_corners=True)
+        x = torch.cat([x, enc_outputs.pop()], dim=1)
+        x = self.dec1(x)
+        
+        return x
 
 # This network is a convolutional neural network, just like the posterior network.
 # But, this network takes input the temperature t as well.
@@ -267,7 +433,7 @@ class PriorNetwork(nn.Module):
         self.logvar = nn.Parameter(torch.zeros(input_dim))
 
     def forward(self, x):
-        return self.mean, self.logvar
+        return self.mean, torch.relu(self.logvar)
     
 # Let's define the MNIST Data Module: i'm using pytorch lightning.
 class MNISTDataModule(pl.LightningDataModule):
@@ -355,6 +521,67 @@ class SVHNDataModule(pl.LightningDataModule):
     def image_size(self):
         return (3, *self.target_image_size)
 
+# STL10 Data Module
+class STL10DataModule(pl.LightningDataModule):
+    def __init__(self, batch_size=32, image_size=(96, 96)):
+        super().__init__()
+        self.batch_size = batch_size
+        self.target_image_size = image_size
+
+    def prepare_data(self):
+        # Download the data
+        datasets.STL10(root='data', split='train', download=True)
+        datasets.STL10(root='data', split='test', download=True)
+
+    def setup(self, stage=None):
+        # Define transforms
+        self.transform = transforms.Compose([
+            transforms.Resize(self.target_image_size),
+            transforms.ToTensor(),
+        ])
+
+        # Load train and test datasets with transforms
+        if stage == 'fit' or stage is None:
+            self.train_dataset = datasets.STL10(
+                root='data',
+                split='train',
+                transform=self.transform,
+                download=True
+            )
+
+        if stage == 'test' or stage is None:
+            self.test_dataset = datasets.STL10(
+                root='data',
+                split='test',
+                transform=self.transform,
+                download=True
+            )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True
+        )
+
+    def val_dataloader(self):
+        # STL10 doesn't have a validation set, so we'll use the test set
+        return self.test_dataloader()
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
+
+    @property
+    def image_size(self):
+        return (3, *self.target_image_size)
     
 # Define a callback to sample and log images
 class SampleAndLogImagesCallback(Callback):
@@ -431,9 +658,9 @@ class VariationalFlowMatching(pl.LightningModule):
         super(VariationalFlowMatching, self).__init__()
         self.prior = PriorNetwork((input_dim, image_size[0], image_size[1]))
         # self.posterior = PosteriorNetwork(input_dim, hidden_dim, kernel_size)
-        self.posterior = PosteriorUNet(input_dim, hidden_dim, kernel_size)
+        self.posterior = PosteriorUNet(input_dim, hidden_dim, kernel_size, image_size)
         # self.velocity_field = VelocityFieldNetwork(input_dim, hidden_dim, kernel_size)
-        self.velocity_field = VelocityFieldUNet(input_dim, hidden_dim, kernel_size)
+        self.velocity_field = VelocityFieldUNet(input_dim, hidden_dim, kernel_size, image_size)
         self.kernel_size = kernel_size
         self.learning_rate = learning_rate
         self.kl_weight = kl_weight
@@ -519,7 +746,7 @@ if __name__ == "__main__":
     config = {
         'batch_size': 64,
         'epochs': 100,
-        'hidden_dim': 64,
+        'hidden_dim': 128,
         'kernel_size': 4, 
         'learning_rate': 1e-3,
         'kl_weight': 1,
@@ -537,6 +764,7 @@ if __name__ == "__main__":
     # data_module = MNISTDataModule(batch_size=config['batch_size'])
     data_module = SVHNDataModule(batch_size=config['batch_size'])
     # data_module = CelebADataModule(batch_size=config['batch_size'])
+    # data_module = STL10DataModule(batch_size=config['batch_size'])
 
     # initialize the model
     model = VariationalFlowMatching(input_dim=data_module.image_size()[0], 
